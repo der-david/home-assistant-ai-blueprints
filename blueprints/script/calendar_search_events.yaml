@@ -1,0 +1,279 @@
+blueprint:
+  name: "LLM-Tool: Kalendertermine suchen"
+  description: >-
+    Script, das einem LLM (Assist / Sprachassistent) erlaubt, Kalendertermine
+    über einen größeren Zeitraum nach Stichworten zu suchen. Basiert auf der
+    Action `calendar.get_events`.
+
+
+    Das LLM übergibt mehrere Suchbegriffe (Synonyme, Wortteile, Schreibweisen).
+    Das Script vergleicht sie ohne Beachtung von Groß-/Kleinschreibung und
+    Umlauten als Teilstring mit Titel, Beschreibung und Ort der Termine und gibt
+    nur die besten Treffer zurück, damit die Antwort an das LLM klein bleibt.
+    Das Bewerten der Treffer bleibt dem LLM überlassen.
+
+
+    Nach dem Anlegen des Scripts muss es unter **Einstellungen > Sprachassistenten
+    > Entitäten freigeben** für Assist freigegeben werden.
+  domain: script
+  input:
+    calendars:
+      name: Kalender
+      description: Kalender, die durchsucht werden.
+      selector:
+        entity:
+          domain: calendar
+          multiple: true
+    days_back:
+      name: Standard-Suchzeitraum zurück (Tage)
+      description: >-
+        Wie weit in die Vergangenheit gesucht wird, wenn das LLM kein
+        Startdatum angibt.
+      default: 30
+      selector:
+        number:
+          min: 0
+          max: 3650
+          unit_of_measurement: Tage
+          mode: box
+    days_ahead:
+      name: Standard-Suchzeitraum voraus (Tage)
+      description: >-
+        Wie weit in die Zukunft gesucht wird, wenn das LLM kein Enddatum angibt.
+      default: 365
+      selector:
+        number:
+          min: 0
+          max: 3650
+          unit_of_measurement: Tage
+          mode: box
+    max_results:
+      name: Maximale Trefferzahl
+      description: >-
+        Höchstens so viele Termine werden an das LLM zurückgegeben. Je kleiner,
+        desto kleiner die Payload.
+      default: 10
+      selector:
+        number:
+          min: 1
+          max: 50
+          mode: box
+    description_max_chars:
+      name: Maximale Länge der Beschreibung
+      description: >-
+        Beschreibungen werden auf diese Zeichenzahl gekürzt. 0 lässt die
+        Beschreibung ganz weg.
+      default: 120
+      selector:
+        number:
+          min: 0
+          max: 1000
+          unit_of_measurement: Zeichen
+          mode: box
+    collapse_recurring:
+      name: Wiederkehrende Termine zusammenfassen
+      description: >-
+        Termine mit gleichem Titel, gleicher Uhrzeit und gleichem Ort (z. B.
+        wöchentliche Serien) werden zu einem Eintrag zusammengefasst. Gezeigt
+        wird der nächste anstehende Termin, dazu die Anzahl weiterer Termine
+        und der letzte Termin im Suchzeitraum.
+      default: true
+      selector:
+        boolean:
+
+mode: parallel
+max: 5
+
+description: >-
+  Searches the user's calendars for events by keywords over a wide time range
+  (past and future). Use this to answer questions like "when is my dentist
+  appointment?", "when was the last time I had X?" or to find an event the user
+  describes only vaguely. The search is a case-insensitive substring match, so
+  you must provide several alternative search terms yourself. If nothing is
+  found, call again with different or broader terms. The response contains the
+  searched date range, the best matching events (upcoming ones first) and a note
+  if results were cut off.
+
+fields:
+  search_terms:
+    name: Search terms
+    description: >-
+      List of 2 to 6 short, varied search terms. Include the main keyword plus
+      synonyms, related words, word stems or partial words, singular/plural and
+      alternative spellings, and translations if the calendar may use another
+      language (e.g. ["zahnarzt", "zahn", "dentist", "kieferorthopäde"]). A term
+      matches as a substring against the event title, description and location,
+      case-insensitive and ignoring umlauts, so "zahn" also finds "Zahnarzt".
+      An event is returned if ANY term matches; events matching more terms rank
+      higher. Do NOT use generic words like "appointment", "termin", "meeting"
+      or single letters, because they match too many events.
+    required: true
+    example: '["zahnarzt", "zahn", "dentist"]'
+    selector:
+      text:
+        multiple: true
+  start_date:
+    name: Start date
+    description: >-
+      Optional. Only search events on or after this date, format YYYY-MM-DD.
+      If omitted, a default range in the past is searched. The response states
+      the range that was searched.
+    required: false
+    example: "2026-01-01"
+    selector:
+      date:
+  end_date:
+    name: End date
+    description: >-
+      Optional. Only search events up to and including this date, format
+      YYYY-MM-DD. If omitted, a default range in the future is searched.
+    required: false
+    example: "2026-12-31"
+    selector:
+      date:
+
+sequence:
+  - variables:
+      calendars_list: !input calendars
+      days_back: !input days_back
+      days_ahead: !input days_ahead
+      max_results: !input max_results
+      description_max_chars: !input description_max_chars
+      collapse_recurring: !input collapse_recurring
+      terms: >-
+        {% macro norm(s) -%}
+        {{ s | string | lower | replace('ä', 'a') | replace('ö', 'o') | replace('ü', 'u') | replace('ß', 'ss') | replace('é', 'e') | replace('è', 'e') | replace('à', 'a') | replace('ae', 'a') | replace('oe', 'o') | replace('ue', 'u') | trim }}
+        {%- endmacro %}
+        {% set raw = search_terms | default([], true) %}
+        {% set raw = raw if (raw is iterable and raw is not string) else [raw] %}
+        {% set ns = namespace(terms=[]) %}
+        {% for t in raw %}
+          {% set n = norm(t) %}
+          {% if n | length >= 2 and n not in ns.terms %}
+            {% set ns.terms = ns.terms + [n] %}
+          {% endif %}
+        {% endfor %}
+        {{ ns.terms }}
+      range_start: >-
+        {% if (start_date | default('', true) | string | trim) != '' %}
+          {% set s = as_datetime(start_date, none) %}
+        {% else %}
+          {% set s = today_at('00:00') - timedelta(days=days_back | int(30)) %}
+        {% endif %}
+        {{ as_local(s).isoformat() if s else '' }}
+      range_end: >-
+        {% if (end_date | default('', true) | string | trim) != '' %}
+          {% set d = as_datetime(end_date, none) %}
+          {% set e = d + timedelta(days=1) if d else none %}
+        {% else %}
+          {% set e = today_at('00:00') + timedelta(days=(days_ahead | int(365)) + 1) %}
+        {% endif %}
+        {{ as_local(e).isoformat() if e else '' }}
+  - variables:
+      range_valid: >-
+        {{ range_start != '' and range_end != '' and as_datetime(range_end) > as_datetime(range_start) }}
+  - choose:
+      - conditions:
+          - condition: template
+            value_template: "{{ terms | length == 0 }}"
+        sequence:
+          - variables:
+              result:
+                success: false
+                error: >-
+                  No usable search terms. Provide at least one specific search
+                  term with 2 or more characters.
+          - stop: No search terms
+            response_variable: result
+      - conditions:
+          - condition: template
+            value_template: "{{ not range_valid }}"
+        sequence:
+          - variables:
+              result:
+                success: false
+                error: >-
+                  Invalid date range. start_date and end_date must use the format
+                  YYYY-MM-DD and end_date must not be before start_date.
+          - stop: Invalid date range
+            response_variable: result
+  - action: calendar.get_events
+    target:
+      entity_id: !input calendars
+    data:
+      start_date_time: "{{ range_start }}"
+      end_date_time: "{{ range_end }}"
+    response_variable: events_response
+  - variables:
+      result: >-
+        {% macro norm(s) -%}
+        {{ s | string | lower | replace('ä', 'a') | replace('ö', 'o') | replace('ü', 'u') | replace('ß', 'ss') | replace('é', 'e') | replace('è', 'e') | replace('à', 'a') | replace('ae', 'a') | replace('oe', 'o') | replace('ue', 'u') | trim }}
+        {%- endmacro %}
+        {% set today = now().strftime('%Y-%m-%d') %}
+        {% set multi = calendars_list | length > 1 %}
+        {% set ns = namespace(rows=[], merged=[], items=[]) %}
+        {% for cal, data in (events_response | default({}, true)).items() %}
+          {% for e in ((data.get('events') or []) if data is mapping else []) %}
+            {% set summ = (e.get('summary') or '') | string %}
+            {% set desc = (e.get('description') or '') | string %}
+            {% set loc = (e.get('location') or '') | string %}
+            {% set start = (e.get('start') or '') | string %}
+            {% set shay = norm(summ) %}
+            {% set ohay = norm(desc ~ ' ' ~ loc) %}
+            {% set score = (terms | select('in', shay) | list | length) * 2 + (terms | select('in', ohay) | list | length) %}
+            {% if score > 0 %}
+              {% set ns.rows = ns.rows + [{
+                'key': norm(summ) ~ '|' ~ start[11:19] ~ '|' ~ norm(loc) ~ '|' ~ cal,
+                'score': score,
+                'past': start[:10] < today,
+                'calendar': state_attr(cal, 'friendly_name') or cal,
+                'summary': summ,
+                'start': start,
+                'end': (e.get('end') or '') | string,
+                'location': loc,
+                'description': desc,
+                'further': 0,
+                'last': ''
+              }] %}
+            {% endif %}
+          {% endfor %}
+        {% endfor %}
+        {% if collapse_recurring %}
+          {% for k, grp in ns.rows | groupby('key') %}
+            {% set g = grp | sort(attribute='start') %}
+            {% set upcoming = g | rejectattr('past') | list %}
+            {% set rep = upcoming[0] if upcoming else g[-1] %}
+            {% set ns.merged = ns.merged + [dict(rep, further=(g | length) - 1, last=g[-1].start)] %}
+          {% endfor %}
+        {% else %}
+          {% set ns.merged = ns.rows %}
+        {% endif %}
+        {% set ranked = ns.merged | sort(attribute='start') | sort(attribute='past') | sort(attribute='score', reverse=true) %}
+        {% set shown = ranked[:(max_results | int(10))] %}
+        {% for r in shown %}
+          {% set item = {'summary': r.summary, 'start': r.start, 'end': r.end} %}
+          {% if r.location %}{% set item = dict(item, location=r.location) %}{% endif %}
+          {% if r.description and (description_max_chars | int(0)) > 0 %}
+            {% set maxc = description_max_chars | int(0) %}
+            {% set item = dict(item, description=(r.description[:maxc] ~ ('…' if r.description | length > maxc else ''))) %}
+          {% endif %}
+          {% if multi %}{% set item = dict(item, calendar=r.calendar) %}{% endif %}
+          {% if r.further > 0 %}{% set item = dict(item, further_occurrences=r.further, last_occurrence=r.last) %}{% endif %}
+          {% set ns.items = ns.items + [item] %}
+        {% endfor %}
+        {% set res = {
+          'success': true,
+          'searched_from': range_start[:10],
+          'searched_to': (as_datetime(range_end) - timedelta(days=1)).strftime('%Y-%m-%d'),
+          'total_matches': ranked | length,
+          'returned': ns.items | length,
+          'events': ns.items
+        } %}
+        {% if ranked | length == 0 %}
+          {% set res = dict(res, note='No events matched. Try different or broader search terms (synonyms, word stems) or a wider date range.') %}
+        {% elif ranked | length > ns.items | length %}
+          {% set res = dict(res, note='More matches exist than returned. Refine the search terms or narrow the date range.') %}
+        {% endif %}
+        {{ res }}
+  - stop: Search finished
+    response_variable: result
