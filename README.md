@@ -35,7 +35,8 @@ Das LLM übergibt mehrere Suchbegriffe (`search_terms`: Synonyme, Wortteile, Sch
 
 - Teilstring-Vergleich ohne Groß-/Kleinschreibung und Umlaute (`Müller` = `mueller`) auf Titel, Beschreibung und Ort.
 - Ein Termin ist ein Treffer, wenn **ein** Begriff passt. Mehr passende Begriffe ranken höher, Titeltreffer zählen doppelt, danach kommen anstehende vor vergangenen Terminen.
-- Wiederkehrende Termine (gleicher Titel, gleiche Uhrzeit, gleicher Ort) werden optional zu einem Eintrag mit `further_occurrences` und `last_occurrence` zusammengefasst.
+- Die Treffer sind getrennt in `upcoming_events` (chronologisch, der nächste zuerst) und `past_events` (der jüngste zuerst). Die Antwort enthält außerdem `current_date_time`, damit das LLM nicht raten muss, was „nächster“ bedeutet. Alle Zeiten sind in Ortszeit, dazu kommt der Wochentag.
+- Wiederkehrende Termine (gleicher Titel, gleiche Uhrzeit, gleicher Ort) werden optional zusammengefasst: je ein Eintrag für den nächsten kommenden Termin (`further_occurrences`, `last_occurrence`) und für den letzten vergangenen (`earlier_occurrences`).
 - Die Antwort enthält den tatsächlich durchsuchten Zeitraum, `total_matches` und bei Bedarf einen Hinweis (`note`), z. B. wenn nichts gefunden wurde oder Treffer abgeschnitten wurden. So kann das LLM mit anderen Begriffen erneut suchen.
 
 Eingaben des Blueprints:

@@ -91,8 +91,11 @@ description: >-
   describes only vaguely. The search is a case-insensitive substring match, so
   you must provide several alternative search terms yourself. If nothing is
   found, call again with different or broader terms. The response contains the
-  searched date range, the best matching events (upcoming ones first) and a note
-  if results were cut off.
+  current date and time, the searched date range, and the matches split into
+  upcoming_events (chronological, the first entry is the next one) and
+  past_events (most recent first). Times are in local time. For recurring events
+  only one entry per series is returned with the number of further occurrences.
+  A note is included if nothing was found or results were cut off.
 
 fields:
   search_terms:
@@ -209,30 +212,45 @@ sequence:
         {% macro norm(s) -%}
         {{ s | string | lower | replace('ä', 'a') | replace('ö', 'o') | replace('ü', 'u') | replace('ß', 'ss') | replace('é', 'e') | replace('è', 'e') | replace('à', 'a') | replace('ae', 'a') | replace('oe', 'o') | replace('ue', 'u') | trim }}
         {%- endmacro %}
-        {% set today = now().strftime('%Y-%m-%d') %}
+        {% set current = now() %}
+        {% set today = current.strftime('%Y-%m-%d') %}
         {% set multi = calendars_list | length > 1 %}
-        {% set ns = namespace(rows=[], merged=[], items=[]) %}
+        {% set ns = namespace(rows=[], merged=[], up=[], down=[]) %}
         {% for cal, data in (events_response | default({}, true)).items() %}
           {% for e in ((data.get('events') or []) if data is mapping else []) %}
             {% set summ = (e.get('summary') or '') | string %}
             {% set desc = (e.get('description') or '') | string %}
             {% set loc = (e.get('location') or '') | string %}
-            {% set start = (e.get('start') or '') | string %}
+            {% set start_raw = (e.get('start') or '') | string %}
+            {% set end_raw = (e.get('end') or '') | string %}
             {% set shay = norm(summ) %}
             {% set ohay = norm(desc ~ ' ' ~ loc) %}
             {% set score = (terms | select('in', shay) | list | length) * 2 + (terms | select('in', ohay) | list | length) %}
             {% if score > 0 %}
+              {% set timed = start_raw | length > 10 %}
+              {% set s_dt = as_datetime(start_raw, none) %}
+              {% set e_dt = as_datetime(end_raw, none) %}
+              {% set s_out = as_local(s_dt).isoformat() if (timed and s_dt) else start_raw %}
+              {% set e_out = as_local(e_dt).isoformat() if (timed and e_dt) else end_raw %}
+              {% if timed and e_dt %}
+                {% set is_past = as_local(e_dt) < current %}
+              {% elif timed and s_dt %}
+                {% set is_past = as_local(s_dt) < current %}
+              {% else %}
+                {% set is_past = (end_raw[:10] or start_raw[:10]) <= today %}
+              {% endif %}
               {% set ns.rows = ns.rows + [{
-                'key': norm(summ) ~ '|' ~ start[11:19] ~ '|' ~ norm(loc) ~ '|' ~ cal,
+                'key': norm(summ) ~ '|' ~ s_out[11:19] ~ '|' ~ norm(loc) ~ '|' ~ cal ~ '|' ~ is_past,
                 'score': score,
-                'past': start[:10] < today,
+                'past': is_past,
                 'calendar': state_attr(cal, 'friendly_name') or cal,
                 'summary': summ,
-                'start': start,
-                'end': (e.get('end') or '') | string,
+                'start': s_out,
+                'end': e_out,
+                'weekday': s_dt.strftime('%A') if s_dt else '',
                 'location': loc,
                 'description': desc,
-                'further': 0,
+                'count': 1,
                 'last': ''
               }] %}
             {% endif %}
@@ -241,37 +259,52 @@ sequence:
         {% if collapse_recurring %}
           {% for k, grp in ns.rows | groupby('key') %}
             {% set g = grp | sort(attribute='start') %}
-            {% set upcoming = g | rejectattr('past') | list %}
-            {% set rep = upcoming[0] if upcoming else g[-1] %}
-            {% set ns.merged = ns.merged + [dict(rep, further=(g | length) - 1, last=g[-1].start)] %}
+            {% if g[0].past %}
+              {% set ns.merged = ns.merged + [dict(g[-1], count=g | length)] %}
+            {% else %}
+              {% set ns.merged = ns.merged + [dict(g[0], count=g | length, last=g[-1].start)] %}
+            {% endif %}
           {% endfor %}
         {% else %}
           {% set ns.merged = ns.rows %}
         {% endif %}
         {% set ranked = ns.merged | sort(attribute='start') | sort(attribute='past') | sort(attribute='score', reverse=true) %}
         {% set shown = ranked[:(max_results | int(10))] %}
-        {% for r in shown %}
-          {% set item = {'summary': r.summary, 'start': r.start, 'end': r.end} %}
+        {% for r in (shown | rejectattr('past') | sort(attribute='start')) %}
+          {% set item = {'summary': r.summary, 'start': r.start, 'end': r.end, 'weekday': r.weekday} %}
           {% if r.location %}{% set item = dict(item, location=r.location) %}{% endif %}
           {% if r.description and (description_max_chars | int(0)) > 0 %}
             {% set maxc = description_max_chars | int(0) %}
             {% set item = dict(item, description=(r.description[:maxc] ~ ('…' if r.description | length > maxc else ''))) %}
           {% endif %}
           {% if multi %}{% set item = dict(item, calendar=r.calendar) %}{% endif %}
-          {% if r.further > 0 %}{% set item = dict(item, further_occurrences=r.further, last_occurrence=r.last) %}{% endif %}
-          {% set ns.items = ns.items + [item] %}
+          {% if r.count > 1 %}{% set item = dict(item, further_occurrences=r.count - 1, last_occurrence=r.last) %}{% endif %}
+          {% set ns.up = ns.up + [item] %}
+        {% endfor %}
+        {% for r in (shown | selectattr('past') | sort(attribute='start', reverse=true)) %}
+          {% set item = {'summary': r.summary, 'start': r.start, 'end': r.end, 'weekday': r.weekday} %}
+          {% if r.location %}{% set item = dict(item, location=r.location) %}{% endif %}
+          {% if r.description and (description_max_chars | int(0)) > 0 %}
+            {% set maxc = description_max_chars | int(0) %}
+            {% set item = dict(item, description=(r.description[:maxc] ~ ('…' if r.description | length > maxc else ''))) %}
+          {% endif %}
+          {% if multi %}{% set item = dict(item, calendar=r.calendar) %}{% endif %}
+          {% if r.count > 1 %}{% set item = dict(item, earlier_occurrences=r.count - 1) %}{% endif %}
+          {% set ns.down = ns.down + [item] %}
         {% endfor %}
         {% set res = {
           'success': true,
+          'current_date_time': current.strftime('%Y-%m-%d %H:%M') ~ ' (' ~ current.strftime('%A') ~ ')',
           'searched_from': range_start[:10],
           'searched_to': (as_datetime(range_end) - timedelta(days=1)).strftime('%Y-%m-%d'),
           'total_matches': ranked | length,
-          'returned': ns.items | length,
-          'events': ns.items
+          'returned': (ns.up | length) + (ns.down | length),
+          'upcoming_events': ns.up,
+          'past_events': ns.down
         } %}
         {% if ranked | length == 0 %}
           {% set res = dict(res, note='No events matched. Try different or broader search terms (synonyms, word stems) or a wider date range.') %}
-        {% elif ranked | length > ns.items | length %}
+        {% elif ranked | length > (ns.up | length) + (ns.down | length) %}
           {% set res = dict(res, note='More matches exist than returned. Refine the search terms or narrow the date range.') %}
         {% endif %}
         {{ res }}
