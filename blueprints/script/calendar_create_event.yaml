@@ -13,13 +13,12 @@ blueprint:
     calendar:
       name: Kalender
       description: >-
-        Kalender, in dem die Termine angelegt werden. Es werden nur Kalender
-        angezeigt, die das Anlegen von Terminen unterstützen.
+        Kalender, in dem die Termine angelegt werden. Der Kalender muss das
+        Anlegen von Terminen unterstützen (z. B. Google Kalender, Lokaler Kalender,
+        CalDAV).
       selector:
         entity:
           domain: calendar
-          supported_features:
-            - calendar.CalendarEntityFeature.CREATE_EVENT
     default_duration_minutes:
       name: Standarddauer (Minuten)
       description: >-

@@ -21,7 +21,7 @@ Die `fields` des Scripts sind die Parameter, die das LLM sieht. Ihre `descriptio
 
 Eingaben des Blueprints:
 
-- **Kalender**: Ziel-Kalender (nur Kalender, die das Anlegen unterstützen).
+- **Kalender**: Ziel-Kalender (muss das Anlegen von Terminen unterstützen).
 - **Standarddauer**: Dauer in Minuten, wenn das LLM kein Ende angibt (Standard 60).
 
 Felder für das LLM: `summary` (Pflicht), `start_date_time` / `end_date_time` (Termin mit Uhrzeit) oder `start_date` / `end_date` (ganztägig, Ende exklusiv), `description`, `location`.
