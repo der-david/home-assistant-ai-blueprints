@@ -1,0 +1,249 @@
+blueprint:
+  name: "LLM-Tool: Kalendertermin erstellen"
+  description: >-
+    Script, das einem LLM (Assist / Sprachassistent) erlaubt, einen neuen Termin
+    in einem Kalender anzulegen. Basiert auf der Action `calendar.create_event`.
+
+
+    Nach dem Anlegen des Scripts muss es unter **Einstellungen > Sprachassistenten
+    > Entitäten freigeben** für Assist freigegeben werden, damit das LLM es als
+    Tool sieht. Die Felder des Scripts sind die Parameter, die das LLM befüllt.
+  domain: script
+  input:
+    calendar:
+      name: Kalender
+      description: >-
+        Kalender, in dem die Termine angelegt werden. Es werden nur Kalender
+        angezeigt, die das Anlegen von Terminen unterstützen.
+      selector:
+        entity:
+          domain: calendar
+          supported_features:
+            - calendar.CalendarEntityFeature.CREATE_EVENT
+    default_duration_minutes:
+      name: Standarddauer (Minuten)
+      description: >-
+        Dauer eines Termins mit Uhrzeit, wenn das LLM kein Ende angibt.
+      default: 60
+      selector:
+        number:
+          min: 5
+          max: 1440
+          step: 5
+          unit_of_measurement: min
+          mode: box
+
+mode: queued
+max: 5
+
+description: >-
+  Creates a new event in the user's calendar. Use this when the user asks to add,
+  create or schedule an appointment, meeting, reminder or any other calendar
+  entry. For an event at a specific time provide start_date_time (and optionally
+  end_date_time). For an all-day event provide start_date instead. Resolve
+  relative expressions like "tomorrow" or "next Friday" to absolute dates using
+  the current date and time before calling.
+
+fields:
+  summary:
+    name: Summary
+    description: Title of the event, e.g. "Dentist appointment".
+    required: true
+    example: Dentist appointment
+    selector:
+      text:
+  start_date_time:
+    name: Start date and time
+    description: >-
+      Start of an event at a specific time, in the local time zone, format
+      YYYY-MM-DD HH:MM:SS. Use this OR start_date, never both.
+    required: false
+    example: "2026-10-29 14:30:00"
+    selector:
+      datetime:
+  end_date_time:
+    name: End date and time
+    description: >-
+      End of an event at a specific time, same format as start_date_time. Must
+      be after the start. Optional, a default duration is used if omitted. Only
+      valid together with start_date_time.
+    required: false
+    example: "2026-10-29 15:30:00"
+    selector:
+      datetime:
+  start_date:
+    name: Start date (all-day)
+    description: >-
+      First day of an all-day event, format YYYY-MM-DD. Use this OR
+      start_date_time, never both.
+    required: false
+    example: "2026-10-29"
+    selector:
+      date:
+  end_date:
+    name: End date (all-day)
+    description: >-
+      Day AFTER the last day of an all-day event (the end is exclusive), format
+      YYYY-MM-DD. For a single-day event omit this field. For an event from the
+      3rd to the 5th, use the 6th. Only valid together with start_date.
+    required: false
+    example: "2026-10-30"
+    selector:
+      date:
+  description:
+    name: Description
+    description: Optional longer description or notes for the event.
+    required: false
+    selector:
+      text:
+        multiline: true
+  location:
+    name: Location
+    description: Optional location of the event.
+    required: false
+    example: Main Street 1, Berlin
+    selector:
+      text:
+
+sequence:
+  - variables:
+      calendar_entity: !input calendar
+      default_duration_minutes: !input default_duration_minutes
+      event_summary: "{{ summary | default('', true) | string | trim }}"
+      has_start_date_time: "{{ (start_date_time | default('', true) | string | trim) != '' }}"
+      has_start_date: "{{ (start_date | default('', true) | string | trim) != '' }}"
+      extra_fields: >-
+        {% set d = {} %}
+        {% if (description | default('', true) | string | trim) != '' %}
+          {% set d = dict(d, description=description | string | trim) %}
+        {% endif %}
+        {% if (location | default('', true) | string | trim) != '' %}
+          {% set d = dict(d, location=location | string | trim) %}
+        {% endif %}
+        {{ d }}
+  - choose:
+      - conditions:
+          - condition: template
+            value_template: "{{ event_summary == '' }}"
+        sequence:
+          - variables:
+              result:
+                success: false
+                error: summary is required.
+          - stop: Missing summary
+            response_variable: result
+
+      # Termin mit Uhrzeit
+      - conditions:
+          - condition: template
+            value_template: "{{ has_start_date_time }}"
+        sequence:
+          - variables:
+              start_dt: >-
+                {% set s = as_datetime(start_date_time, none) %}
+                {{ as_local(s).strftime('%Y-%m-%d %H:%M:%S') if s else '' }}
+              end_dt: >-
+                {% set s = as_datetime(start_date_time, none) %}
+                {% set e = as_datetime(end_date_time, none) if (end_date_time | default('', true) | string | trim) != '' else none %}
+                {% if s and e is none %}
+                  {% set e = s + timedelta(minutes=default_duration_minutes | int(60)) %}
+                {% endif %}
+                {{ as_local(e).strftime('%Y-%m-%d %H:%M:%S') if e else '' }}
+          - if:
+              - condition: template
+                value_template: "{{ start_dt == '' or end_dt == '' }}"
+            then:
+              - variables:
+                  result:
+                    success: false
+                    error: >-
+                      start_date_time or end_date_time could not be parsed. Use the
+                      format YYYY-MM-DD HH:MM:SS.
+              - stop: Invalid date and time
+                response_variable: result
+          - if:
+              - condition: template
+                value_template: "{{ end_dt <= start_dt }}"
+            then:
+              - variables:
+                  result:
+                    success: false
+                    error: end_date_time must be after start_date_time.
+              - stop: Invalid time range
+                response_variable: result
+          - action: calendar.create_event
+            target:
+              entity_id: !input calendar
+            data: >-
+              {{ dict(extra_fields, summary=event_summary, start_date_time=start_dt, end_date_time=end_dt) }}
+          - variables:
+              result:
+                success: true
+                summary: "{{ event_summary }}"
+                calendar: "{{ calendar_entity }}"
+                start: "{{ start_dt }}"
+                end: "{{ end_dt }}"
+          - stop: Event created
+            response_variable: result
+
+      # Ganztägiger Termin
+      - conditions:
+          - condition: template
+            value_template: "{{ has_start_date }}"
+        sequence:
+          - variables:
+              start_d: >-
+                {% set s = as_datetime(start_date, none) %}
+                {{ s.strftime('%Y-%m-%d') if s else '' }}
+              end_d: >-
+                {% set s = as_datetime(start_date, none) %}
+                {% set e = as_datetime(end_date, none) if (end_date | default('', true) | string | trim) != '' else none %}
+                {% if s and e is none %}
+                  {% set e = s + timedelta(days=1) %}
+                {% endif %}
+                {{ e.strftime('%Y-%m-%d') if e else '' }}
+          - if:
+              - condition: template
+                value_template: "{{ start_d == '' or end_d == '' }}"
+            then:
+              - variables:
+                  result:
+                    success: false
+                    error: start_date or end_date could not be parsed. Use the format YYYY-MM-DD.
+              - stop: Invalid date
+                response_variable: result
+          - if:
+              - condition: template
+                value_template: "{{ end_d <= start_d }}"
+            then:
+              - variables:
+                  result:
+                    success: false
+                    error: >-
+                      end_date must be after start_date. The end is exclusive, so
+                      it must be the day after the last day of the event.
+              - stop: Invalid date range
+                response_variable: result
+          - action: calendar.create_event
+            target:
+              entity_id: !input calendar
+            data: >-
+              {{ dict(extra_fields, summary=event_summary, start_date=start_d, end_date=end_d) }}
+          - variables:
+              result:
+                success: true
+                summary: "{{ event_summary }}"
+                calendar: "{{ calendar_entity }}"
+                start: "{{ start_d }}"
+                end: "{{ end_d }}"
+          - stop: Event created
+            response_variable: result
+    default:
+      - variables:
+          result:
+            success: false
+            error: >-
+              Provide either start_date_time (event at a specific time) or
+              start_date (all-day event).
+      - stop: Missing start
+        response_variable: result
